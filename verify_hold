@@ -1,0 +1,286 @@
+# -*- coding: utf-8 -*-
+"""
+/***************************************************************************
+ addBlockAreaGroup
+                                 A QGIS plugin
+ This plugin allows you to add block area grouping
+                              -------------------
+        begin                : 2015-06-23
+        git sha              : $Format:%H$
+        copyright            : (C) 2015 by Cisco Velasquez
+        email                : ciscovelasquez@gmail.com
+ ***************************************************************************/
+
+/***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+/****
+ *This class digitizes Block Area Groups using addBlockGroupTool.py class, verify business rules and save
+****/
+"""
+
+from PyQt4.QtCore import *
+from PyQt4.QtGui import *
+from PyQt4 import *
+# Initialize Qt resources from file resources.py
+#import resources_rc
+# Import the code for the dialog
+from gupsapp.modules.addBlockAreaGroup.addBlockAreaGroup_dialog import addBlockAreaGroupDialog
+from gupsapp.modules.addBlockAreaGroup.addBlockGroupTool import AddBlockGroupTool
+from gupsapp.gupslib import EventManager as evm
+from qgis.gui import *
+from qgis.core import *
+import qgis.utils
+import os.path
+import ast
+
+class addBlockAreaGroup:
+    """QGIS Plugin Implementation."""
+
+    def __init__(self, iface):
+        """Constructor.
+
+        :param iface: An interface instance that will be passed to this class
+            which provides the hook by which you can manipulate the QGIS
+            application at run time.
+        :type iface: QgsInterface
+        """
+        # Save reference to the QGIS interface
+        self.iface = iface
+        self.map_canvas = self.iface.mapCanvas()
+        # initialize plugin directory
+        self.plugin_dir = os.path.dirname(__file__)
+        # initialize locale
+        locale = QSettings().value('locale/userLocale')[0:2]
+        locale_path = os.path.join(
+            self.plugin_dir,
+            'i18n',
+            'addBlockAreaGroup_{}.qm'.format(locale))
+
+        if os.path.exists(locale_path):
+            self.translator = QTranslator()
+            self.translator.load(locale_path)
+
+            if qVersion() > '4.3.3':
+                QCoreApplication.installTranslator(self.translator)
+        if 'gupsapp' in qgis.utils.plugins:
+            self.gst = qgis.utils.plugins['gupsapp'].gst
+            self.dbu = qgis.utils.plugins['gupsapp'].dbu
+            self.layerapi = qgis.utils.plugins['gupsapp'].layerapi
+            self.msgapi = qgis.utils.plugins['gupsapp'].msgapi
+            #self.initGui()
+        #Get layers
+        stcou = str(self.gst.getWorkSTCOU)
+        self.edge_layer = self.layerapi.getLayerFromName(self.iface, 'edges_'+stcou, False)
+        self.water_layer = self.layerapi.getLayerFromName(self.iface, 'water_'+stcou, False)
+        self.county_layer = self.layerapi.getLayerFromName(self.iface, 'county_'+stcou, False)
+        self.face_layer  = self.layerapi.getLayerFromName(self.iface, 'faces_'+stcou, False)
+        self.bag_layer  = self.layerapi.getLayerFromName(self.iface, 'bag_'+stcou, False)
+        # Create the dialog (after translation) and keep reference
+        self.dlg = addBlockAreaGroupDialog()
+        self.map_tool = AddBlockGroupTool(self.map_canvas,self.edge_layer, self.county_layer)
+        self.nameValue = None
+        self.mtfccValue = None
+        self.rq = None
+        self.snappedPtLIst = None
+        self.commandId = None
+        self.commandText = None
+
+        QObject.connect(evm.EMIT_OBJECT, evm.COUNTY_CHANGE_COMPLETE, self.handler)
+
+
+
+    # noinspection PyMethodMayBeStatic
+    def tr(self, message):
+        """Get the translation for a string using Qt translation API.
+
+        We implement this ourselves since we do not inherit QObject.
+
+        :param message: String for translation.
+        :type message: str, QString
+
+        :returns: Translated version of message.
+        :rtype: QString
+        """
+        # noinspection PyTypeChecker,PyArgumentList,PyCallByClass
+        return QCoreApplication.translate('addBlockAreaGroup', message)
+
+    def initGui(self):
+        """Create the menu entries and toolbar icons inside the QGIS GUI."""
+        QObject.connect(self.map_canvas, SIGNAL("mapToolSet(QgsMapTool*)"), self.deactivate)
+
+    def handler(self):
+        self.map_tool.cancelButtonClicked(True)
+        self.__init__(qgis.utils.iface)
+        self.iface.actionPan().trigger()
+
+    #Start digitizing by calling addBlockGroupTool
+    def startTool(self):
+        try :
+            stcou = str(self.gst.getWorkSTCOU)
+            self.bag_layer  = self.layerapi.getLayerFromName(self.iface, 'bag_'+stcou, True)
+            qgis.utils.iface.messageBar().clearWidgets()
+            #set the map tool
+            self.map_canvas.setMapTool(self.map_tool)
+            self.map_canvas.refresh()
+            #disconnect and connect our custom signals
+            try:
+                self.map_tool.line_complete.disconnect(self.createFeature)
+            except Exception:
+                pass
+            self.map_tool.line_complete.connect(self.createFeature)
+            self.map_tool.cancel_complete.connect(self.cancel)
+        except (Exception) as e:
+            self.msgapi.showMsg('999999', 'error in startTool()', None, [str(e.args[0])])
+
+
+    def cancel(self):
+        pass
+
+    def unload(self):
+        pass
+
+    def deactivate(self):
+        pass
+
+    def run(self):
+        pass
+
+    #Verify business rules for BAGS, and save
+    def createFeature(self, geom, list):
+        # Check if MTFCC attribute is already in BAG shapefile, return "-1" if not
+        ind = self.bag_layer.dataProvider().fieldNameIndex('MTFCC')
+        if ind == -1:
+            res =  self.bag_layer.dataProvider().addAttributes([QgsField("MTFCC", QVariant.String)])
+            self.bag_layer.updateFields()
+        else :
+            pass
+
+        try :
+            #Get feature count
+            count = self.edge_layer.featureCount()
+            #Create buffer around geom
+            gBuff = geom.buffer( (self.iface.mapCanvas().mapUnitsPerPixel() * 1000),100)
+            grect = gBuff.boundingBox()
+            grq = QgsFeatureRequest(grect)
+            #Check1 : if BAG is on water
+            water_list = self.water_layer.getFeatures(grq)
+            water_exists = False
+            for f in water_list:
+                g = f.geometry()
+                if g.intersects(geom) :  # P0001  g.contains(geom)
+                    water_exists = True
+                    if not f['MTFCC'].startswith('H'):
+                        self.map_tool.dlg.close()
+                        self.msgapi.showMsg('000058')
+                        #QtGui.QMessageBox.warning(self.iface.mainWindow(),"Warning","Lasso should be on water.")
+                        self.deactivate()
+                        self.map_tool.cancelButtonClicked()
+                        return
+            if not water_exists :
+                self.map_tool.dlg.close()
+                self.msgapi.showMsg('000058')
+                #QtGui.QMessageBox.warning(self.iface.mainWindow(),"Warning","Lasso should be on water.")
+                self.deactivate()
+                self.map_tool.cancelButtonClicked()
+                return
+            #Check 2: if BAG is a closed loop
+            loopTest = geom.asPolyline()
+            if loopTest[0] != loopTest[ len(loopTest) - 1] :
+                self.map_tool.dlg.close()
+                self.msgapi.showMsg('000059')
+                #QtGui.QMessageBox.warning(self.iface.mainWindow(),"Warning","Block Area Group should be a loop.")
+                self.deactivate()
+                self.map_tool.cancelButtonClicked()
+                return
+            else :
+                #Convert the linear feature geom to a polygon
+                geomList = ast.literal_eval( str(geom.exportToGeoJSON()) ).get('coordinates')
+                polyList = [[]]
+                for gelt in geomList :
+                    x = gelt[0]
+                    y = gelt[1]
+                    polyList[0].append(QgsPoint(x,y))
+                geomPoly = QgsGeometry.fromPolygon(polyList)
+                #Check 3: if BAG contains others BAGS
+                for f in self.bag_layer.getFeatures(grq):
+                    if f.geometry().contains(geomPoly) :
+                        self.map_tool.dlg.close()
+                        self.msgapi.showMsg('000060')
+                        #QtGui.QMessageBox.warning(self.iface.mainWindow(),"Warning","BAG should not contain other bags.")
+                        self.deactivate()
+                        self.map_tool.cancelButtonClicked()
+                        return
+                #Check 4: if BAG intersects another BAG
+                for f in self.bag_layer.getFeatures(grq):
+                    if geomPoly.intersects(f.geometry()) :
+                        self.map_tool.dlg.close()
+                        self.msgapi.showMsg('000062')
+                        #QtGui.QMessageBox.warning(self.iface.mainWindow(),"Warning","BAG cannot intersects another bag.")
+                        self.deactivate()
+                        self.map_tool.cancelButtonClicked()
+                        return
+
+            #Check 5: Check if BAG intersects with land
+            lineBuff = geom.buffer( (self.map_canvas.mapUnitsPerPixel() * 100),100)
+            rect = lineBuff.boundingBox()
+            self.rq = QgsFeatureRequest(rect)
+            for feat in self.edge_layer.getFeatures(self.rq):
+                if feat.id() != count :
+                    if feat.geometry().intersects(geom) :
+                        #Check if BAG intersect with Land
+                        if  str(feat['MTFCC'])  in ('P0002','P0003')  :
+                            self.map_tool.dlg.close()
+                            self.msgapi.showMsg('000061')
+                            #QtGui.QMessageBox.warning(self.iface.mainWindow(),"Warning","Lasso should not intersect with Land.")
+                            self.deactivate()
+                            self.map_tool.cancelButtonClicked()
+                            return
+                        else :
+                            pass
+
+            #Add the bag to shapefile
+            #start Editing
+            self.bag_layer.startEditing()
+            self.bag_layer.beginEditCommand('Add BAG')
+            feature = QgsFeature()
+            feature.setGeometry(geomPoly)
+            fields = self.bag_layer.pendingFields()
+            feature.initAttributes(fields.count())
+            #Get all indexes needed
+            idx_mtfcc = self.bag_layer.fieldNameIndex('MTFCC')
+            idx_new_code = self.bag_layer.fieldNameIndex('BAGCE')
+            idx_chng_type =  self.bag_layer.fieldNameIndex('CHNG_TYPE')
+            idx_st = self.bag_layer.fieldNameIndex('STATEFP')
+            idx_cou = self.bag_layer.fieldNameIndex('COUNTYFP')
+            #Setting the attribute values
+            stcou = str(self.gst.getGupsWorkInfo[0][3])
+            feature.setAttribute(idx_mtfcc,'G5035')
+            feature.setAttribute(idx_chng_type, 'E')
+            feature.setAttribute(idx_st ,stcou[0:2])
+            feature.setAttribute(idx_cou,stcou[2:5])
+            bagCode= str(len(self.bag_layer.allFeatureIds()) + 1)
+
+
+            feature.setAttribute(idx_new_code, bagCode.zfill(3))
+
+            self.bag_layer.addFeatures([feature])
+            #stop editing mode
+            self.bag_layer.endEditCommand()
+            self.bag_layer.removeSelection()
+            self.bag_layer.updateExtents()
+            self.bag_layer.setCacheImage(None)
+            #Refresh canvas
+            self.map_canvas.refresh()
+            stcou = str(self.gst.getWorkSTCOU)
+            self.bag_layer  = self.layerapi.getLayerFromName(self.iface, 'bag_'+stcou, True)
+
+        except (Exception) as e:
+            self.msgapi.showMsg('999999', 'error in createFeature()', None, [str(e.args[0])])
+
+
